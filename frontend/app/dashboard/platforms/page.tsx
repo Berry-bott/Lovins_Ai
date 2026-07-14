@@ -57,7 +57,7 @@ const PLATFORMS = [
 
 export default function PlatformsPage() {
   const router = useRouter()
-  const [selectedPlatforms, setSelectedPlatforms] = useState(['WhatsApp'])
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([])
   const [showModal, setShowModal] = useState<string | null>(null)
 
   const togglePlatform = (platform: string) => {

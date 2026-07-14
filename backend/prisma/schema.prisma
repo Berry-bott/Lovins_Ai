@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  botConnections BotConnection[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@map("users")
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@map("password_reset_tokens")
+}
+
+model BotConnection {
+  id             String            @id @default(cuid())
+  userId         String
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform       Platform
+  status         ConnectionStatus @default(PENDING_TOKEN)
+  credentials    Json
+  botpressBotId  String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  reminders      Reminder[]
+  notes          Note[]
+  expenses       Expense[]
+
+  @@unique([userId, platform])
+  @@map("bot_connections")
+}
+
+enum Platform {
+  TELEGRAM
+  EMAIL
+  WHATSAPP
+}
+
+enum ConnectionStatus {
+  PENDING_TOKEN
+  ACTIVE
+  ERROR
+  DISCONNECTED
+}
+
+model Reminder {
+  id              String        @id @default(cuid())
+  botConnectionId String
+  botConnection   BotConnection @relation(fields: [botConnectionId], references: [id], onDelete: Cascade)
+  message         String
+  remindAt        DateTime
+  sent            Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+
+  @@map("reminders")
+}
+
+model Note {
+  id              String        @id @default(cuid())
+  botConnectionId String
+  botConnection   BotConnection @relation(fields: [botConnectionId], references: [id], onDelete: Cascade)
+  content         String
+  createdAt       DateTime      @default(now())
+
+  @@map("notes")
+}
+
+model Expense {
+  id              String        @id @default(cuid())
+  botConnectionId String
+  botConnection   BotConnection @relation(fields: [botConnectionId], references: [id], onDelete: Cascade)
+  amount          Float
+  category        String?
+  vendor          String?
+  sourceType      String
+  createdAt       DateTime      @default(now())
+
+  @@map("expenses")
+}
