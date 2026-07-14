@@ -35,3 +35,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+*.log
+backend/prisma-gen.log
+frontend/prisma-gen-output.txt
