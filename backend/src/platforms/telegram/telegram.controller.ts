@@ -161,7 +161,7 @@ export async function listConnections(req: Request, res: Response): Promise<void
 export async function getConnection(req: Request, res: Response): Promise<void> {
   try {
     const userId = req.user?.userId
-    const { id } = req.params
+    const id = req.params.id as string
 
     if (!userId) {
       res.status(401).json({ message: 'Unauthorized' })
@@ -211,7 +211,7 @@ export async function getConnection(req: Request, res: Response): Promise<void> 
 export async function disconnectBot(req: Request, res: Response): Promise<void> {
   try {
     const userId = req.user?.userId
-    const { id } = req.params
+    const id = req.params.id as string
 
     if (!userId) {
       res.status(401).json({ message: 'Unauthorized' })
