@@ -1,8 +1,17 @@
 import { Request, Response } from 'express'
+import crypto from 'crypto'
 import prisma from '../../config/database'
-import { authenticate } from '../../middleware/auth.middleware'
 import { connectTelegramSchema, type ConnectTelegramInput } from './telegram.schema'
-import { validateTelegramToken, encryptCredentials, decryptCredentials } from './telegram.service'
+import {
+  validateTelegramToken,
+  encryptCredentials,
+  decryptCredentials,
+  createWebhookSecret,
+  configureTelegramWebhook,
+  removeTelegramWebhook,
+  sendTelegramMessage,
+} from './telegram.service'
+import type { TelegramUpdate } from './telegram.types'
 
 export async function connectTelegram(req: Request, res: Response): Promise<void> {
   try {
@@ -26,13 +35,22 @@ export async function connectTelegram(req: Request, res: Response): Promise<void
       return
     }
 
+    // Render supplies its actual public URL at runtime; local development uses an HTTPS tunnel.
+    const publicApiUrl = (process.env.RENDER_EXTERNAL_URL || process.env.API_PUBLIC_URL)?.trim().replace(/\/$/, '')
+    if (!publicApiUrl || !publicApiUrl.startsWith('https://')) {
+      res.status(503).json({ message: 'Telegram setup requires API_PUBLIC_URL to be a public HTTPS URL' })
+      return
+    }
+
     // Validate token with Telegram API
     const botInfo = await validateTelegramToken(botToken)
 
     // Encrypt credentials
+    const webhookSecret = createWebhookSecret()
     const encryptedCredentials = encryptCredentials({
       botToken,
       botUsername: botInfo.username,
+      webhookSecret,
     })
 
     // Check if connection already exists
@@ -45,54 +63,49 @@ export async function connectTelegram(req: Request, res: Response): Promise<void
       },
     })
 
-    if (existingConnection) {
-      // Update existing connection
-      const updated = await prisma.botConnection.update({
+    const connection = existingConnection
+      ? await prisma.botConnection.update({
         where: { id: existingConnection.id },
         data: {
           credentials: encryptedCredentials,
-          status: 'ACTIVE',
+          status: 'PENDING_TOKEN',
           botpressBotId: null,
         },
       })
-
-      res.status(200).json({
-        message: 'Telegram bot connected successfully',
-        connection: {
-          id: updated.id,
-          platform: updated.platform,
-          status: updated.status,
-          credentials: {
-            botUsername: botInfo.username,
+      : await prisma.botConnection.create({
+          data: {
+            userId,
+            platform: 'TELEGRAM',
+            status: 'PENDING_TOKEN',
+            credentials: encryptedCredentials,
           },
-          createdAt: updated.createdAt,
-          updatedAt: updated.updatedAt,
-        },
-      })
+        })
+
+    try {
+      await configureTelegramWebhook(botToken, `${publicApiUrl}/api/webhooks/telegram/${connection.id}`, webhookSecret)
+    } catch (webhookError) {
+      await prisma.botConnection.update({ where: { id: connection.id }, data: { status: 'ERROR' } })
+      console.error('Configure Telegram webhook error:', webhookError)
+      res.status(502).json({ message: 'Telegram token is valid, but webhook setup failed. Please try again.' })
       return
     }
 
-    // Create new connection
-    const connection = await prisma.botConnection.create({
-      data: {
-        userId,
-        platform: 'TELEGRAM',
-        status: 'ACTIVE',
-        credentials: encryptedCredentials,
-      },
+    const activeConnection = await prisma.botConnection.update({
+      where: { id: connection.id },
+      data: { status: 'ACTIVE' },
     })
 
-    res.status(201).json({
+    res.status(existingConnection ? 200 : 201).json({
       message: 'Telegram bot connected successfully',
       connection: {
-        id: connection.id,
-        platform: connection.platform,
-        status: connection.status,
+        id: activeConnection.id,
+        platform: activeConnection.platform,
+        status: activeConnection.status,
         credentials: {
           botUsername: botInfo.username,
         },
-        createdAt: connection.createdAt,
-        updatedAt: connection.updatedAt,
+        createdAt: activeConnection.createdAt,
+        updatedAt: activeConnection.updatedAt,
       },
     })
   } catch (error) {
@@ -100,7 +113,6 @@ export async function connectTelegram(req: Request, res: Response): Promise<void
     res.status(500).json({ message: 'Internal server error' })
   }
 }
-
 export async function listConnections(req: Request, res: Response): Promise<void> {
   try {
     const userId = req.user?.userId
@@ -230,6 +242,17 @@ export async function disconnectBot(req: Request, res: Response): Promise<void> 
       return
     }
 
+    if (connection.platform === 'TELEGRAM') {
+      try {
+        const credentials = decryptCredentials(connection.credentials as string)
+        await removeTelegramWebhook(credentials.botToken)
+      } catch (error) {
+        console.error('Remove Telegram webhook error:', error)
+        res.status(502).json({ message: 'Could not remove Telegram webhook. The bot remains connected.' })
+        return
+      }
+    }
+
     await prisma.botConnection.update({
       where: { id: connection.id },
       data: {
@@ -244,11 +267,65 @@ export async function disconnectBot(req: Request, res: Response): Promise<void> 
   }
 }
 
-function extractBotUsername(credentials: unknown): string | undefined {
+export async function receiveTelegramUpdate(req: Request, res: Response): Promise<void> {
+  const connectionId = req.params.id as string
+  const update = req.body as TelegramUpdate
+
+  if (!Number.isInteger(update?.update_id) || !update.message?.chat?.id) {
+    res.status(200).json({ ok: true })
+    return
+  }
+
   try {
-    const creds = typeof credentials === 'string' ? JSON.parse(credentials) : credentials
-    return creds?.botUsername
-  } catch {
-    return undefined
+    const connection = await prisma.botConnection.findFirst({
+      where: { id: connectionId, platform: 'TELEGRAM', status: 'ACTIVE' },
+    })
+
+    if (!connection) {
+      res.status(404).json({ message: 'Telegram connection not found' })
+      return
+    }
+
+    const credentials = decryptCredentials(connection.credentials as string)
+    const suppliedSecret = req.header('x-telegram-bot-api-secret-token') || ''
+    const expectedSecret = credentials.webhookSecret || ''
+    const supplied = Buffer.from(suppliedSecret)
+    const expected = Buffer.from(expectedSecret)
+    if (!expected.length || supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+      res.status(401).json({ message: 'Invalid Telegram webhook secret' })
+      return
+    }
+
+    const text = update.message.text?.trim() || ''
+    const noteMatch = text.match(/^(?:\/note(?:@\w+)?\s+|note:\s*)(.+)$/is)
+    let reply: string
+    if (noteMatch?.[1]?.trim()) {
+      reply = 'Saved that note.'
+    } else {
+      reply = 'Hi! Send /note followed by text to save a note. Example: /note Call Ada tomorrow.'
+    }
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.telegramUpdate.create({
+          data: { botConnectionId: connection.id, updateId: update.update_id },
+        })
+        if (noteMatch?.[1]?.trim()) {
+          await tx.note.create({
+            data: { botConnectionId: connection.id, content: noteMatch[1].trim() },
+          })
+        }
+      })
+    } catch (error) {
+      // Telegram retries updates when delivery fails. Keep note creation idempotent,
+      // but still retry the reply below for an already-recorded update.
+      if ((error as { code?: string }).code !== 'P2002') throw error
+    }
+
+    await sendTelegramMessage(credentials.botToken, update.message.chat.id, reply)
+    res.status(200).json({ ok: true })
+  } catch (error) {
+    console.error('Telegram update error:', error)
+    res.status(500).json({ message: 'Failed to process Telegram update' })
   }
 }

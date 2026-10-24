@@ -1,4 +1,5 @@
 import axios from 'axios'
+import crypto from 'crypto'
 import { TelegramCredentials, TelegramBotInfo } from './telegram.types'
 import { encrypt, decrypt } from '../../utils/crypto'
 
@@ -27,6 +28,45 @@ export async function validateTelegramToken(token: string): Promise<TelegramBotI
       throw error
     }
     throw new Error('Failed to validate bot token')
+  }
+}
+
+export function createWebhookSecret(): string {
+  // Telegram allows URL-safe letters, numbers, underscores, and hyphens.
+  return crypto.randomBytes(32).toString('base64url')
+}
+
+export async function configureTelegramWebhook(
+  token: string,
+  webhookUrl: string,
+  secret: string
+): Promise<void> {
+  const response = await axios.post(`${TELEGRAM_API_URL}/bot${token}/setWebhook`, {
+    url: webhookUrl,
+    secret_token: secret,
+    allowed_updates: ['message'],
+  }, { timeout: 10000 })
+
+  if (!response.data.ok) {
+    throw new Error(response.data.description || 'Failed to configure Telegram webhook')
+  }
+}
+
+export async function removeTelegramWebhook(token: string): Promise<void> {
+  const response = await axios.post(`${TELEGRAM_API_URL}/bot${token}/deleteWebhook`, {}, { timeout: 10000 })
+  if (!response.data.ok) {
+    throw new Error(response.data.description || 'Failed to remove Telegram webhook')
+  }
+}
+
+export async function sendTelegramMessage(token: string, chatId: number, text: string): Promise<void> {
+  const response = await axios.post(`${TELEGRAM_API_URL}/bot${token}/sendMessage`, {
+    chat_id: chatId,
+    text,
+  }, { timeout: 10000 })
+
+  if (!response.data.ok) {
+    throw new Error(response.data.description || 'Failed to send Telegram message')
   }
 }
 
